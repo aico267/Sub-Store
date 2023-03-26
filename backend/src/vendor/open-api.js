@@ -2,7 +2,10 @@
 const isQX = typeof $task !== 'undefined';
 const isLoon = typeof $loon !== 'undefined';
 const isSurge = typeof $httpClient !== 'undefined' && !isLoon;
-const isNode = eval(`typeof process !== "undefined"`);
+const isNode = eval(`typeof process !== "undefined"`); // eval is needed in order to avoid browserify processing
+const isStash =
+    'undefined' !== typeof $environment && $environment['stash-version'];
+const isShadowRocket = 'undefined' !== typeof $rocket;
 
 export class OpenAPI {
     constructor(name = 'untitled', debug = false) {
@@ -48,24 +51,20 @@ export class OpenAPI {
             // create a json for root cache
             let fpath = 'root.json';
             if (!this.node.fs.existsSync(fpath)) {
-                this.node.fs.writeFileSync(
-                    fpath,
-                    JSON.stringify({}),
-                    { flag: 'wx' },
-                    (err) => console.log(err),
-                );
+                this.node.fs.writeFileSync(fpath, JSON.stringify({}), {
+                    flag: 'wx',
+                });
+                this.root = {};
+            } else {
+                this.root = JSON.parse(this.node.fs.readFileSync(`${fpath}`));
             }
-            this.root = {};
 
             // create a json file with the given name if not exists
             fpath = `${this.name}.json`;
             if (!this.node.fs.existsSync(fpath)) {
-                this.node.fs.writeFileSync(
-                    fpath,
-                    JSON.stringify({}),
-                    { flag: 'wx' },
-                    (err) => console.log(err),
-                );
+                this.node.fs.writeFileSync(fpath, JSON.stringify({}), {
+                    flag: 'wx',
+                });
                 this.cache = {};
             } else {
                 this.cache = JSON.parse(
@@ -218,7 +217,7 @@ export class OpenAPI {
 }
 
 export function ENV() {
-    return { isQX, isLoon, isSurge, isNode };
+    return { isQX, isLoon, isSurge, isNode, isStash, isShadowRocket };
 }
 
 export function HTTP(defaultOptions = { baseURL: '' }) {
@@ -253,6 +252,17 @@ export function HTTP(defaultOptions = { baseURL: '' }) {
         };
 
         events.onRequest(method, options);
+
+        if (options.node) {
+            // Surge & Loon allow connecting to a server using a specified proxy node
+            if (isSurge) {
+                const build = $environment['surge-build'];
+                if (build && parseInt(build) >= 2407) {
+                    options['policy-descriptor'] = options.node;
+                    delete options.node;
+                }
+            }
+        }
 
         let worker;
         if (isQX) {

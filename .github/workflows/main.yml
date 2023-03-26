@@ -1,0 +1,54 @@
+name: build
+on: 
+  push:
+    branches:
+      - master
+    paths:
+      - 'backend/package.json'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'backend/package.json'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: 'master'
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "14"
+      - name: Install dependencies
+        run: |
+          npm install -g pnpm
+          cd backend && pnpm i
+      - name: Test
+        run: |
+          cd backend
+          pnpm test
+      - name: Build
+        run: |
+          cd backend
+          pnpm run build
+      - id: tag
+        name: Generate release tag
+        run: |
+          cd backend
+          SUBSTORE_RELEASE=`node --eval="process.stdout.write(require('./package.json').version)"`
+          echo "::set-output name=release_tag::$SUBSTORE_RELEASE"
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          files: |
+            ./backend/sub-store.min.js
+            ./backend/dist/sub-store-0.min.js
+            ./backend/dist/sub-store-1.min.js
+            ./backend/dist/sub-store-parser.loon.min.js
+            ./backend/dist/cron-sync-artifacts.min.js

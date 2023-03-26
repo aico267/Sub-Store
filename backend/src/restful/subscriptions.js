@@ -1,11 +1,19 @@
-import { SUBS_KEY, COLLECTIONS_KEY } from './constants';
-import { produceArtifact } from './artifacts';
-import $ from '../core/app';
+import {
+    NetworkError,
+    InternalServerError,
+    ResourceNotFoundError,
+    RequestInvalidError,
+} from './errors';
+import { deleteByName, findByName, updateByName } from '@/utils/database';
+import { SUBS_KEY, COLLECTIONS_KEY, ARTIFACTS_KEY } from '@/constants';
+import { getFlowHeaders } from '@/utils/flow';
+import { success, failed } from './response';
+import $ from '@/core/app';
+
+if (!$.read(SUBS_KEY)) $.write({}, SUBS_KEY);
 
 export default function register($app) {
-    if (!$.read(SUBS_KEY)) $.write({}, SUBS_KEY);
-
-    $app.get('/download/:name', downloadSubscription);
+    $app.get('/api/sub/flow/:name', getFlowInfo);
 
     $app.route('/api/sub/:name')
         .get(getSubscription)
@@ -16,203 +24,181 @@ export default function register($app) {
 }
 
 // subscriptions API
-async function downloadSubscription(req, res) {
-    const { name } = req.params;
-    const { raw } = req.query || 'false';
-    const platform =
-        req.query.target || getPlatformFromHeaders(req.headers) || 'JSON';
-
-    $.info(`正在下载订阅：${name}`);
-
+async function getFlowInfo(req, res) {
+    let { name } = req.params;
+    name = decodeURIComponent(name);
     const allSubs = $.read(SUBS_KEY);
-    const sub = allSubs[name];
-    if (sub) {
-        try {
-            const output = await produceArtifact({
-                type: 'subscription',
-                item: sub,
-                platform,
-                noProcessor: raw,
-            });
-
-            if (sub.source !== 'local') {
-                // forward flow headers
-                const flowInfo = await getFlowHeaders(sub.url);
-                if (flowInfo) {
-                    res.set('subscription-userinfo', flowInfo);
-                }
-            }
-
-            if (platform === 'JSON') {
-                res.set('Content-Type', 'application/json;charset=utf-8').send(
-                    output,
-                );
-            } else {
-                res.send(output);
-            }
-        } catch (err) {
-            $.notify(
-                `🌍 『 𝑺𝒖𝒃-𝑺𝒕𝒐𝒓𝒆 』 下载订阅失败`,
-                `❌ 无法下载订阅：${name}！`,
-                `🤔 原因：${JSON.stringify(err)}`,
+    const sub = findByName(allSubs, name);
+    if (!sub) {
+        failed(
+            res,
+            new ResourceNotFoundError(
+                'RESOURCE_NOT_FOUND',
+                `Subscription ${name} does not exist!`,
+            ),
+            404,
+        );
+        return;
+    }
+    if (sub.source === 'local') {
+        failed(
+            res,
+            new RequestInvalidError(
+                'NO_FLOW_INFO',
+                'N/A',
+                `Local subscription ${name} has no flow information!`,
+            ),
+        );
+        return;
+    }
+    try {
+        const flowHeaders = await getFlowHeaders(sub.url);
+        if (!flowHeaders) {
+            failed(
+                res,
+                new InternalServerError(
+                    'NO_FLOW_INFO',
+                    'No flow info',
+                    `Failed to fetch flow headers`,
+                ),
             );
-            $.error(JSON.stringify(err));
-            res.status(500).json({
-                status: 'failed',
-                message: err,
-            });
+            return;
         }
-    } else {
-        $.notify(`🌍 『 𝑺𝒖𝒃-𝑺𝒕𝒐𝒓𝒆 』 下载订阅失败`, `❌ 未找到订阅：${name}！`);
-        res.status(404).json({
-            status: 'failed',
-        });
+
+        // unit is KB
+        const uploadMatch = flowHeaders.match(/upload=(-?)(\d+)/)
+        const upload = Number(uploadMatch[1] + uploadMatch[2]);
+
+        const downloadMatch = flowHeaders.match(/download=(-?)(\d+)/)
+        const download = Number(downloadMatch[1] + downloadMatch[2]);
+
+        const total = Number(flowHeaders.match(/total=(\d+)/)[1]);
+
+        // optional expire timestamp
+        const match = flowHeaders.match(/expire=(\d+)/);
+        const expires = match ? Number(match[1]) : undefined;
+
+        success(res, { expires, total, usage: { upload, download } });
+    } catch (err) {
+        failed(
+            res,
+            new NetworkError(
+                `URL_NOT_ACCESSIBLE`,
+                `The URL for subscription ${name} is inaccessible.`,
+            ),
+        );
     }
 }
 
 function createSubscription(req, res) {
     const sub = req.body;
-    const allSubs = $.read(SUBS_KEY);
     $.info(`正在创建订阅： ${sub.name}`);
-    if (allSubs[sub.name]) {
-        res.status(500).json({
-            status: 'failed',
-            message: `订阅${sub.name}已存在！`,
-        });
+    const allSubs = $.read(SUBS_KEY);
+    if (findByName(allSubs, sub.name)) {
+        failed(
+            res,
+            new RequestInvalidError(
+                'DUPLICATE_KEY',
+                `Subscription ${sub.name} already exists.`,
+            ),
+        );
     }
-    // validate name
-    if (/^[\w-_]*$/.test(sub.name)) {
-        allSubs[sub.name] = sub;
-        $.write(allSubs, SUBS_KEY);
-        res.status(201).json({
-            status: 'success',
-            data: sub,
-        });
-    } else {
-        res.status(500).json({
-            status: 'failed',
-            message: `订阅名称 ${sub.name} 中含有非法字符！名称中只能包含英文字母、数字、下划线、横杠。`,
-        });
-    }
+    allSubs.push(sub);
+    $.write(allSubs, SUBS_KEY);
+    success(res, sub, 201);
 }
 
 function getSubscription(req, res) {
-    const { name } = req.params;
-    const sub = $.read(SUBS_KEY)[name];
+    let { name } = req.params;
+    name = decodeURIComponent(name);
+    const allSubs = $.read(SUBS_KEY);
+    const sub = findByName(allSubs, name);
     if (sub) {
-        res.json({
-            status: 'success',
-            data: sub,
-        });
+        success(res, sub);
     } else {
-        res.status(404).json({
-            status: 'failed',
-            message: `未找到订阅：${name}!`,
-        });
+        failed(
+            res,
+            new ResourceNotFoundError(
+                `SUBSCRIPTION_NOT_FOUND`,
+                `Subscription ${name} does not exist`,
+                404,
+            ),
+        );
     }
 }
 
 function updateSubscription(req, res) {
-    const { name } = req.params;
+    let { name } = req.params;
+    name = decodeURIComponent(name); // the original name
     let sub = req.body;
     const allSubs = $.read(SUBS_KEY);
-    if (allSubs[name]) {
+    const oldSub = findByName(allSubs, name);
+    if (oldSub) {
         const newSub = {
-            ...allSubs[name],
+            ...oldSub,
             ...sub,
         };
         $.info(`正在更新订阅： ${name}`);
         // allow users to update the subscription name
         if (name !== sub.name) {
-            // we need to find out all collections refer to this name
-            const allCols = $.read(COLLECTIONS_KEY);
-            for (const k of Object.keys(allCols)) {
-                const idx = allCols[k].subscriptions.indexOf(name);
+            // update all collections refer to this name
+            const allCols = $.read(COLLECTIONS_KEY) || [];
+            for (const collection of allCols) {
+                const idx = collection.subscriptions.indexOf(name);
                 if (idx !== -1) {
-                    allCols[k].subscriptions[idx] = sub.name;
+                    collection.subscriptions[idx] = sub.name;
                 }
             }
-            // update subscriptions
-            delete allSubs[name];
-            allSubs[sub.name] = newSub;
-        } else {
-            allSubs[name] = newSub;
+
+            // update all artifacts referring this subscription
+            const allArtifacts = $.read(ARTIFACTS_KEY) || [];
+            for (const artifact of allArtifacts) {
+                if (
+                    artifact.type === 'subscription' &&
+                    artifact.source == name
+                ) {
+                    artifact.source = sub.name;
+                }
+            }
+
+            $.write(allCols, COLLECTIONS_KEY);
+            $.write(allArtifacts, ARTIFACTS_KEY);
         }
+        updateByName(allSubs, name, newSub);
         $.write(allSubs, SUBS_KEY);
-        res.json({
-            status: 'success',
-            data: newSub,
-        });
+        success(res, newSub);
     } else {
-        res.status(500).json({
-            status: 'failed',
-            message: `订阅${name}不存在，无法更新！`,
-        });
+        failed(
+            res,
+            new ResourceNotFoundError(
+                'RESOURCE_NOT_FOUND',
+                `Subscription ${name} does not exist!`,
+            ),
+            404,
+        );
     }
 }
 
 function deleteSubscription(req, res) {
-    const { name } = req.params;
+    let { name } = req.params;
+    name = decodeURIComponent(name);
     $.info(`删除订阅：${name}...`);
     // delete from subscriptions
     let allSubs = $.read(SUBS_KEY);
-    delete allSubs[name];
+    deleteByName(allSubs, name);
     $.write(allSubs, SUBS_KEY);
     // delete from collections
-    let allCols = $.read(COLLECTIONS_KEY);
-    for (const k of Object.keys(allCols)) {
-        allCols[k].subscriptions = allCols[k].subscriptions.filter(
+    const allCols = $.read(COLLECTIONS_KEY);
+    for (const collection of allCols) {
+        collection.subscriptions = collection.subscriptions.filter(
             (s) => s !== name,
         );
     }
     $.write(allCols, COLLECTIONS_KEY);
-    res.json({
-        status: 'success',
-    });
+    success(res);
 }
 
 function getAllSubscriptions(req, res) {
     const allSubs = $.read(SUBS_KEY);
-    res.json({
-        status: 'success',
-        data: allSubs,
-    });
-}
-
-export async function getFlowHeaders(url) {
-    const { headers } = await $.http.get({
-        url,
-        headers: {
-            'User-Agent': 'Quantumult%20X/1.0.30 (iPhone14,2; iOS 15.6)',
-        },
-    });
-    const subkey = Object.keys(headers).filter((k) =>
-        /SUBSCRIPTION-USERINFO/i.test(k),
-    )[0];
-    return headers[subkey];
-}
-
-export function getPlatformFromHeaders(headers) {
-    const keys = Object.keys(headers);
-    let UA = '';
-    for (let k of keys) {
-        if (/USER-AGENT/i.test(k)) {
-            UA = headers[k];
-            break;
-        }
-    }
-    if (UA.indexOf('Quantumult%20X') !== -1) {
-        return 'QX';
-    } else if (UA.indexOf('Surge') !== -1) {
-        return 'Surge';
-    } else if (UA.indexOf('Decar') !== -1 || UA.indexOf('Loon') !== -1) {
-        return 'Loon';
-    } else if (
-        UA.indexOf('Stash') !== -1 ||
-        UA.indexOf('Shadowrocket') !== -1
-    ) {
-        return 'Clash';
-    } else {
-        return null;
-    }
+    success(res, allSubs);
 }
